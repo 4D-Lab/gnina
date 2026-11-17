@@ -193,11 +193,7 @@ bool eq(const qt& a, const qt& b); // elementwise approximate equality - may ret
 const qt qt_identity(1, 0, 0, 0);
 /* qt angle_to_quaternion(const vec& axis, fl angle); // axis is assumed to be a unit vector */
 __host__  __device__ qt angle_to_quaternion(const vec& rotation); // rotation == angle * axis
-#ifdef __CUDA_ARCH__
-__device__
-
-#endif
-vec quaternion_to_angle(const qt& q);
+__host__ __device__ vec quaternion_to_angle(const qt& q);
 qt random_orientation(rng& generator);
 __host__ __device__ void quaternion_increment(qt& q, const vec& rotation);
 vec quaternion_difference(const qt& b, const qt& a); // rotation that needs to be applied to convert a to b
@@ -302,7 +298,7 @@ __host__  __device__
       +a * dr + b * cr - c * br + d * ar);
 }
 
-inline qt qt::operator/=(const qt& r) {
+__host__ __device__ inline qt qt::operator/=(const qt& r) {
   const fl ar = r.R_component_1();
   const fl br = r.R_component_2();
   const fl cr = r.R_component_3();

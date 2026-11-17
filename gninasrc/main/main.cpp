@@ -63,7 +63,10 @@
 #include "version.h"
 #include "weighted_terms.h"
 
+#include "gpu_runtime.h"
+#ifndef GNINA_HIP
 #include <cuda_profiler_api.h>
+#endif
 
 using namespace boost::iostreams;
 using boost::filesystem::path;
@@ -829,10 +832,24 @@ void thread_a_writing(job_queue<writer_job> *writerq, global_state *gs, ozfile *
   }
 }
 
+// GIT_TAG/GIT_BRANCH/GIT_REV are "N/A" when the tree has no git history -- a
+// release archive, or a copy synced without .git. Leave those parts out rather
+// than reporting "gnina N/A N/A:N/A"; -DGNINA_VERSION=... fills in the tag.
+static std::string make_version_string() {
+  auto known = [](const std::string &s) { return !s.empty() && s != "N/A"; };
+  const std::string tag(GIT_TAG), branch(GIT_BRANCH), rev(GIT_REV);
+  std::string v("gnina");
+  if (known(tag)) v += " " + tag;
+  if (known(branch))
+    v += " " + branch + (known(rev) ? ":" + rev : std::string());
+  else if (known(rev))
+    v += " " + rev;
+  return v + "   Built " __DATE__ ".";
+}
+
 int main(int argc, char *argv[]) {
   using namespace boost::program_options;
-  const std::string version_string =
-      std::string("gnina ") + GIT_TAG + " " + GIT_BRANCH + ":" + GIT_REV + "   Built " __DATE__ ".";
+  const std::string version_string = make_version_string();
   const std::string error_message = "\n\n\
 Please report this error at https://github.com/gnina/gnina/issues\n"
                                     "Please remember to include the following in your problem report:\n\
@@ -1170,13 +1187,30 @@ Thank you!\n";
      // output banner
     log << cite_message << '\n';
     
+#ifdef GNINA_HIP
+    if (settings.gpu_docking) {
+      std::cerr << "ERROR: --gpu_docking is not supported in the HIP/ROCm "
+                   "build.\n"
+                   "It runs the entire minimizer inside a kernel and launches "
+                   "further kernels from device code (CUDA dynamic "
+                   "parallelism), which AMD GPUs do not implement.\n"
+                   "Drop --gpu_docking; CNN scoring still runs on the GPU.\n";
+      return 1;
+    }
+#endif
+
    // check for GPU
     bool torchgpu = false;
     if (torch::cuda::is_available() && !settings.no_gpu) {
       torchgpu = true;
       if (settings.device > 0) {
+#ifdef GNINA_HIP
+        log << "WARNING: Torch backend ignores device argument.  Use HIP_VISIBLE_DEVICES environment to control the "
+               "GPU used.\n";
+#else
         log << "WARNING: Torch backend ignores device argument.  Use CUDA_VISIBLE_DEVICES environment to control CUDA "
                "device used.\n";
+#endif
       }
     } else if (!settings.no_gpu) {
       log << "WARNING: No GPU detected. CNN scoring will be slow.\n"

@@ -5,7 +5,7 @@
 
 #ifndef __DEVICE_BUFFER_H
 #define __DEVICE_BUFFER_H
-#include <cuda_runtime.h>
+#include "gpu_runtime.h"
 #include <assert.h>
 
 size_t available_mem(size_t num_cpu_threads);

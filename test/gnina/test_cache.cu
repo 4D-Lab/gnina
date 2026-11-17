@@ -1,7 +1,7 @@
 #include <numeric>
 #include <cmath>
 #include <random>
-#include <cuda_runtime.h>
+#include "gpu_runtime.h"
 #define BOOST_TEST_DYN_LINK
 #include <boost/test/unit_test.hpp>
 #include <boost/test/tools/floating_point_comparison.hpp>

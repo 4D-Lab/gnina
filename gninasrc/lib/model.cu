@@ -61,7 +61,7 @@ fl model::eval_interacting_pairs_deriv(const precalculate& p, fl v,
 
 //evaluates interacting pairs (which is all of them) on the gpu
 template<typename infoT>
-__host__  __device__ fl gpu_data::eval_interacting_pairs_deriv_gpu(
+GNINA_DEVICE_LAUNCHER fl gpu_data::eval_interacting_pairs_deriv_gpu(
     const infoT& info, fl v, interacting_pair* pairs, unsigned pairs_sz) const { // adds to forces  // clean up
 
   float e = 0;
@@ -71,7 +71,9 @@ __host__  __device__ fl gpu_data::eval_interacting_pairs_deriv_gpu(
   }
 
   const fl cutoff_sqr = info.cutoff_sq;
-#ifdef __CUDA_ARCH__
+  //without dynamic parallelism this is a host-only function, so always take
+  //the host path
+#if defined(GNINA_DEVICE_COMPILE) && defined(GNINA_DEVICE_LAUNCH_SUPPORTED)
   scratch[0] = 0;
 #else
   cudaMemsetAsync(scratch, 0, sizeof(float), cudaStreamPerThread);
@@ -87,7 +89,7 @@ __host__  __device__ fl gpu_data::eval_interacting_pairs_deriv_gpu(
     CUDA_THREADS_PER_BLOCK>>>(info.splineInfo, coords, pairs, pairs_sz,
         cutoff_sqr, v, minus_forces, scratch);
   }
-#ifdef __CUDA_ARCH__ 
+#if defined(GNINA_DEVICE_COMPILE) && defined(GNINA_DEVICE_LAUNCH_SUPPORTED)
   //cudaDeviceSynchronize();
   return scratch[0];
 #else
@@ -136,6 +138,11 @@ fl model::eval(const precalculate& p, const igrid& ig, const vec& v,
   return e;
 }
 
+/* eval_deriv_gpu and its helper kernels drive the whole minimizer from inside
+   a kernel, launching child kernels as they go.  That requires CUDA dynamic
+   parallelism, which ROCm does not provide -- see gpu_runtime.h. */
+#ifdef GNINA_DEVICE_LAUNCH_SUPPORTED
+
 static __global__
 void derivatives_kernel(tree_gpu *t, const vec * coords, const vec* forces,
     change_gpu c) {
@@ -181,6 +188,8 @@ __device__ fl gpu_data::eval_deriv_gpu(const infoT& info, const vec& v,
   /* flex.derivative(coords, minus_forces, g.flex); // inflex forces are ignored */
   return e;
 }
+
+#endif /* GNINA_DEVICE_LAUNCH_SUPPORTED */
 
 //NB: the next two are only used for score_only, but they also compute the forces
 //unnecessarily. this is fine as long as you don't care about using score_only
@@ -537,18 +546,20 @@ size_t gpu_data::node_idx_cpu2gpu(size_t cpu_idx) const {
 }
 
 template
-__host__  __device__ fl gpu_data::eval_interacting_pairs_deriv_gpu<
+GNINA_DEVICE_LAUNCHER fl gpu_data::eval_interacting_pairs_deriv_gpu<
     GPUNonCacheInfo>(const GPUNonCacheInfo& info, fl v, interacting_pair* pairs,
     unsigned pairs_sz) const;
 
 template
-__host__  __device__ fl gpu_data::eval_interacting_pairs_deriv_gpu<GPUCacheInfo>(
+GNINA_DEVICE_LAUNCHER fl gpu_data::eval_interacting_pairs_deriv_gpu<GPUCacheInfo>(
     const GPUCacheInfo& info, fl v, interacting_pair* pairs,
     unsigned pairs_sz) const;
 
+#ifdef GNINA_DEVICE_LAUNCH_SUPPORTED
 template __device__ fl gpu_data::eval_deriv_gpu<GPUNonCacheInfo>(
     const GPUNonCacheInfo& info, const vec& v, const conf_gpu& c,
     change_gpu& g);
 template __device__ fl gpu_data::eval_deriv_gpu<GPUCacheInfo>(
     const GPUCacheInfo& info, const vec& v, const conf_gpu& c, change_gpu& g);
+#endif
 

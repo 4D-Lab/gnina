@@ -4,7 +4,15 @@
 #include "bfgs.h"
 #include "device_buffer.h"
 
-#include <cuda_runtime.h>
+#include "gpu_runtime.h"
+
+/* The whole-minimizer-on-the-GPU path (--gpu_docking) runs BFGS inside a
+ * single block and re-enters the scoring kernels from device code, i.e. it
+ * needs CUDA dynamic parallelism.  ROCm has no equivalent, so on the HIP
+ * backend this file compiles down to a stub that reports the limitation;
+ * see the #else branch at the bottom.  Everything else -- CNN scoring, GPU
+ * grid evaluation, and CPU-driven minimization -- is unaffected. */
+#ifdef GNINA_DEVICE_LAUNCH_SUPPORTED
 
 static __device__ fl new_lambdamin_val(fl p_val, fl x_val, fl cur_val) {
   // return fabsf(p.values[i]) / fmaxf(fabsf(x.values[i]),
@@ -334,7 +342,7 @@ fl bfgs(quasi_newton_aux_gpu<infoT> &f, conf_gpu& x, change_gpu& g,
   CUDA_CHECK_GNINA(device_malloc(&f0, sizeof(float)));
   //TODO: make safe for the case where num_movable_atoms > 1024
   assert(f.ig.num_movable_atoms <= 1024);
-  bfgs_gpu<<<1, ROUND_TO_WARP(max(WARPSIZE, f.ig.num_movable_atoms))>>>(f, x,
+  bfgs_gpu<<<1, ROUND_TO_WARP(std::max<unsigned>(WARPSIZE, f.ig.num_movable_atoms))>>>(f, x,
       x_orig, x_new, g, g_orig, g_new, p, y, h, minus_hy,
       average_required_improvement, params, f0);
   CUDA_CHECK_GNINA(
@@ -369,6 +377,20 @@ template __global__ void bfgs_gpu(quasi_newton_aux_gpu<GPUCacheInfo>,
     change_gpu g_orig, change_gpu g_new, change_gpu p, change_gpu y,
     flmat_gpu h, change_gpu minus_hy, const fl average_required_improvement,
     const minimization_params params, float* out_energy);
+
+#else /* !GNINA_DEVICE_LAUNCH_SUPPORTED -- HIP/ROCm */
+
+template<typename infoT>
+fl bfgs(quasi_newton_aux_gpu<infoT> &f, conf_gpu& x, change_gpu& g,
+    const fl average_required_improvement, const minimization_params& params) {
+  std::cerr << "ERROR: whole-minimizer-on-GPU docking (--gpu_docking) is not "
+      "available in the HIP/ROCm build: it relies on launching kernels from "
+      "device code, which AMD GPUs do not support.\n"
+      "Run without --gpu_docking; CNN scoring still uses the GPU.\n";
+  abort();
+}
+
+#endif /* GNINA_DEVICE_LAUNCH_SUPPORTED */
 
 template fl bfgs(quasi_newton_aux_gpu<GPUNonCacheInfo>&, conf_gpu&, change_gpu&,
     const fl, const minimization_params&);

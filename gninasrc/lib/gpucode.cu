@@ -4,7 +4,9 @@
 #include "curl.h"
 
 #define THREADS_PER_BLOCK 1024
-#define warpSize 32
+/* Warp/wavefront width comes from WARPSIZE (gpu_util.h -> gpu_runtime.h); it
+   is 32 on NVIDIA and 32 or 64 on AMD depending on the target ISA.  Do not
+   shadow the runtime's own warpSize here -- on HIP that is a real symbol. */
 
 __global__
 void evaluate_splines(float **splines, float r, float fraction, float cutoff,
@@ -121,11 +123,11 @@ float eval_deriv_gpu(const GPUSplineInfo* splineInfo, unsigned t, float charge,
 }
 
 template<typename T> T __device__ __host__ zero(void);
-template<> gfloat3 zero(void) {
+template<> __device__ __host__ gfloat3 zero(void) {
   return gfloat3(0, 0, 0);
 }
 
-template<> float zero(void) {
+template<> __device__ __host__ float zero(void) {
   return 0;
 }
 
@@ -141,14 +143,14 @@ void xadd(force_energy_tup *a, const force_energy_tup &b) {
 //device functions for warp-based reduction using shufl operations
 template<class T>
 __device__   __forceinline__ T warp_sum(T mySum) {
-  for (int offset = warpSize >> 1; offset > 0; offset >>= 1)
+  for (int offset = WARPSIZE >> 1; offset > 0; offset >>= 1)
     mySum += shuffle_down(mySum, offset);
   return mySum;
 }
 
 __device__ __forceinline__
-bool isNotDiv32(unsigned int val) {
-  return val & 31;
+bool isNotDivWarp(unsigned int val) {
+  return val & (WARPSIZE - 1);
 }
 
 __device__
@@ -160,20 +162,23 @@ void operator+=(force_energy_tup &a, const force_energy_tup &b) {
 /* requires blockDim.x <= 1024, blockDim.y == 1 */
 template<class T>
 __device__   __forceinline__ T block_sum(T mySum) {
-  const unsigned int lane = threadIdx.x & 31;
-  const unsigned int wid = threadIdx.x >> 5;
+  const unsigned int lane = threadIdx.x & (WARPSIZE - 1);
+  const unsigned int wid = threadIdx.x / WARPSIZE;
 
-  __shared__ T scratch[32];
+  /* One slot per warp.  Sized for the narrowest warp (32) so it is large
+     enough for 64-wide wavefronts too, where a 1024-thread block holds
+     only 16 of them. */
+  __shared__ T scratch[GNINA_MAX_WARPS_PER_BLOCK];
 
   mySum = warp_sum(mySum);
   if (lane == 0) scratch[wid] = mySum;
   __syncthreads();
 
   if (wid == 0) {
-    mySum = (threadIdx.x < blockDim.x >> 5) ? scratch[lane] : zero<T>();
+    mySum = (threadIdx.x < blockDim.x / WARPSIZE) ? scratch[lane] : zero<T>();
     mySum = warp_sum(mySum);
-    if (threadIdx.x == 0 && isNotDiv32(blockDim.x))
-      mySum += scratch[blockDim.x >> 5];
+    if (threadIdx.x == 0 && isNotDivWarp(blockDim.x))
+      mySum += scratch[blockDim.x / WARPSIZE];
   }
   return mySum;
 }
@@ -335,7 +340,7 @@ __global__ void reduce_energy(force_energy_tup *result, int n, float v,
 
 /* } */
 
-__host__ __device__
+GNINA_DEVICE_LAUNCHER
 float single_point_calc(const GPUNonCacheInfo &info, atom_params *ligs,
     force_energy_tup *out, float v) {
   /* Assumed by warp_sum */
@@ -364,7 +369,7 @@ float single_point_calc(const GPUNonCacheInfo &info, atom_params *ligs,
   reduce_energy<<<1, ROUND_TO_WARP(num_movable_atoms)>>>(out, num_movable_atoms,
       v, info.gridbegins, info.gridends, info.slope, ligs);
   abort_on_gpu_err();
-#ifdef __CUDA_ARCH__
+#if defined(GNINA_DEVICE_COMPILE) && defined(GNINA_DEVICE_LAUNCH_SUPPORTED)
   return out->energy;
 #else
   cudaDeviceSynchronize();
@@ -383,7 +388,7 @@ void cache_gpu_kernel(const GPUCacheInfo info, atom_params *ligs,
 __host__ __device__
 float single_point_calc(const GPUCacheInfo &info, atom_params *ligs,
     force_energy_tup *out, float v) {
-#ifdef __CUDA_ARCH__
+#ifdef GNINA_DEVICE_COMPILE
   /* Assumed by warp_sum */
   assert(THREADS_PER_BLOCK <= 1024);
   interaction_energy(info, ligs, out, v);

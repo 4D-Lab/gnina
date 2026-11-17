@@ -44,6 +44,7 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/pygnina/")
 add_link_options("LINKER:--exclude-libs,ALL")  # avoid exporting  symbols
 add_library(pygnina SHARED ${PYGNINA_SOURCES})
 target_link_libraries(pygnina ${Boost_LIBRARIES} ${CUDA_LIBRARIES} gninalib_static )
+gnina_gpu_link_options(pygnina)
 
 
 # Suppress prefix "lib" because Python does not allow this prefix

@@ -42,7 +42,7 @@
 
 #include "macros.h"
 #include "math.h"
-#include <cuda_runtime.h>
+#include "gpu_runtime.h"
 
 typedef float fl;
 
@@ -78,7 +78,7 @@ typedef std::pair<fl, fl> pr;
 
 // TODO: remove alignment. Exists so that vec operations in tree_gpu.cu can
 // coalesce reads and writes.
-#if defined(__CUDACC__)
+#if defined(GNINA_GPUCC)
 #define CUDA_ALIGN(n) __align__(n)
 #else
 #define CUDA_ALIGN(n) alignas(n)
@@ -124,11 +124,10 @@ struct CUDA_ALIGN(4 * sizeof(float)) vec {
   __host__ __device__ fl y() const { return data[1]; }
   __host__ __device__ fl z() const { return data[2]; }
 
-#ifndef __CUDA_ARCH__
-  fl norm() const { return std::sqrt(norm_sqr()); }
-#else
-  __device__ float norm() const { return sqrtf(norm_sqr()); }
-#endif
+  // fl is float, so sqrtf is exactly what the host path used to do. clang
+  // requires the host and device passes to agree on the overload set, so this
+  // cannot be an #ifdef-selected pair the way nvcc allows.
+  __host__ __device__ fl norm() const { return sqrtf(norm_sqr()); }
   __host__ __device__ fl operator*(const vec &v) const { return data[0] * v[0] + data[1] * v[1] + data[2] * v[2]; }
   __host__ __device__ const vec &operator+=(const vec &v) {
     data[0] += v[0];
@@ -301,13 +300,9 @@ inline sz fl_to_sz(fl x, sz max_sz) { // return a value in [0, max_sz]
 
 const fl fl_tolerance = fl(0.001);
 
-#ifndef __CUDA_ARCH__
-__host__ inline bool eq(fl a, fl b) { return std::abs(a - b) < fl_tolerance; }
-#else
-__device__ inline bool eq(float a, float b) { return fabsf(a - b) < fl_tolerance; }
+__host__ __device__ inline bool eq(float a, float b) { return fabsf(a - b) < fl_tolerance; }
 
-__device__ inline bool eq(double a, double b) { return fabs(a - b) < fl_tolerance; }
-#endif
+__host__ __device__ inline bool eq(double a, double b) { return fabs(a - b) < fl_tolerance; }
 
 __host__ __device__ inline bool eq(const vec &a, const vec &b) {
   return eq(a[0], b[0]) && eq(a[1], b[1]) && eq(a[2], b[2]);
@@ -349,15 +344,17 @@ sz find_min(
   return tmp;
 }
 
-#ifndef __CUDA_ARCH__
-__host__ inline void normalize_angle(fl &x) { // subtract or add enough 2*pi's to make x be in [-pi, pi]
+// Host and device differed only in the diagnostic; the arithmetic is identical
+// (fl is float, so ceilf matches std::ceil here). clang needs one signature
+// across both passes, so the host-only warning is guarded inside the body.
+__host__ __device__ inline void normalize_angle(fl &x) { // subtract or add enough 2*pi's to make x be in [-pi, pi]
   if (x > 3 * pi) {                           // very large
     fl n = (x - pi) / (2 * pi);               // how many 2*pi's do you want to subtract?
-    x -= 2 * pi * std::ceil(n);               // ceil can be very slow, but this should not be called often
+    x -= 2 * pi * ceilf(n);                   // ceil can be very slow, but this should not be called often
     normalize_angle(x);
   } else if (x < -3 * pi) {      // very small
     fl n = (-x - pi) / (2 * pi); // how many 2*pi's do you want to add?
-    x += 2 * pi * std::ceil(n);  // ceil can be very slow, but this should not be called often
+    x += 2 * pi * ceilf(n);      // ceil can be very slow, but this should not be called often
     normalize_angle(x);
   } else if (x > pi) { // in (   pi, 3*pi]
     x -= 2 * pi;
@@ -365,37 +362,18 @@ __host__ inline void normalize_angle(fl &x) { // subtract or add enough 2*pi's t
     x += 2 * pi;
   }
   if (!(x >= -pi - epsilon_fl && x <= pi + epsilon_fl)) {
+#ifndef GNINA_DEVICE_COMPILE
     static bool didwarn = false;
     if(!didwarn) {
       didwarn = true;
       std::cerr << "Numerical degeneracy encountered. Check for non-physical inputs. " + std::to_string(x) +
                      " should be between -pi and pi.\n";
     }
+#endif
     x = 0;
   }
   // in [-pi, pi]
 }
-#else
-__device__ inline void normalize_angle(fl &x) {
-  if (x > 3 * pi) {
-    fl n = (x - pi) / (2 * pi);
-    x -= 2 * pi * ceilf(n);
-    normalize_angle(x);
-  } else if (x < -3 * pi) {
-    fl n = (-x - pi) / (2 * pi);
-    x += 2 * pi * ceilf(n);
-    normalize_angle(x);
-  } else if (x > pi) {
-    x -= 2 * pi;
-  } else if (x < -pi) {
-    x += 2 * pi;
-  }
-  if (!(x >= -pi - epsilon_fl && x <= pi + epsilon_fl)) {
-    x = 0;
-  }
-  // TODO: put the assert back?
-}
-#endif
 
 __host__ __device__ inline fl normalized_angle(fl x) {
   normalize_angle(x);

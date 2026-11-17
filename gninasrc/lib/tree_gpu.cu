@@ -308,8 +308,16 @@ void tree_gpu::_derivative(const gfloat4 *coords, const gfloat4* forces,
     gfloat4 r = origin - parent_origin;
 
     pseudoAtomicAdd(&force_torques[parent_id].first, ft.first);
+    /* cross_product() is declared on vec, so its result is a vec.  Adding it
+     * to a gfloat4 used to need the ::operator+ qualification to keep vec's
+     * *member* operator+ out of the overload set.  Under HIP that trick
+     * backfires: float4 is a class template with its own operator+ templates,
+     * and (vec, gfloat4) makes gnina's and HIP's candidates each better on one
+     * argument -- ambiguous.  Converting to gfloat4 up front makes
+     * operator+(gfloat4, gfloat4) an exact match on both arguments, which
+     * beats HIP's derived-to-base binding and needs no qualification. */
     pseudoAtomicAdd(&force_torques[parent_id].second,
-        ::operator+(cross_product(r, ft.first), ft.second));
+        gfloat4(cross_product(r, ft.first)) + ft.second);
   }
 
   if (tid > (nlig_roots - 1) && tid < num_nodes) {

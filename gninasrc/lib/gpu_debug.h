@@ -1,7 +1,8 @@
 #pragma once
 #include <stdio.h>
+#include "gpu_runtime.h"
 
-#ifdef __CUDA_ARCH__
+#ifdef GNINA_DEVICE_COMPILE
 #define pretty_print_array(_arr, _num_elem, arr_name, elem_format)  \
     ({                                                              \
         auto arr = _arr;                                            \
@@ -27,7 +28,7 @@
     })
 #endif
 
-#ifdef __CUDA_ARCH__
+#ifdef GNINA_DEVICE_COMPILE
 #define pretty_print_vec_array(_arr, _num_vecs, arr_name)   \
     ({                                                      \
         vec* arr = _arr;                                    \

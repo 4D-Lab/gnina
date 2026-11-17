@@ -25,7 +25,7 @@
 
 #include <vector>
 #include "triangular_matrix_index.h"
-#include <cuda_runtime.h>
+#include "gpu_runtime.h"
 #include "gpu_util.h"
 #include "device_buffer.h"
 

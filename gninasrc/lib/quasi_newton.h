@@ -56,9 +56,11 @@ template<typename infoT> struct quasi_newton_aux_gpu {
     void adjust_center() {
     } //this may have to be implemented for cnn scoring
 
+#ifdef GNINA_DEVICE_LAUNCH_SUPPORTED
     __device__ fl operator()(const conf_gpu& c, change_gpu& g) {
       return gdata.eval_deriv_gpu(ig, v, c, g);
     }
+#endif
 };
 
 #endif

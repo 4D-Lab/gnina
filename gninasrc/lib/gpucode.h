@@ -5,7 +5,7 @@
 #ifndef __GPUCODE_H
 #define __GPUCODE_H
 // CUDA runtime
-#include <cuda_runtime.h>
+#include "gpu_runtime.h"
 #include <vector>
 #include "interacting_pairs.h"
 #include "grid_gpu.h"
@@ -107,7 +107,8 @@ struct GPUCacheInfo {
 void evaluate_splines_host(const GPUSplineInfo& spInfo, float r,
     float *device_vals, float *device_derivs);
 
-__host__ __device__
+//launches kernels unconditionally, so host-only without dynamic parallelism
+GNINA_DEVICE_LAUNCHER
 float single_point_calc(const GPUNonCacheInfo &dinfo, atom_params *lig,
     force_energy_tup *out, float v);
 

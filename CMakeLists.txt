@@ -1,8 +1,47 @@
 cmake_minimum_required(VERSION 3.25)
-project (gnina C CXX CUDA)
+
+# Which GPU backend to build against: CUDA (NVIDIA) or HIP (AMD/ROCm).
+# The GPU sources are shared; gninasrc/lib/gpu_runtime.h maps the CUDA runtime
+# names onto HIP when GNINA_USE_HIP is defined.
+set(GNINA_GPU_BACKEND "CUDA" CACHE STRING "GPU backend to build: CUDA or HIP")
+set_property(CACHE GNINA_GPU_BACKEND PROPERTY STRINGS CUDA HIP)
+string(TOUPPER "${GNINA_GPU_BACKEND}" GNINA_GPU_BACKEND)
+
+if(GNINA_GPU_BACKEND STREQUAL "HIP")
+  set(GNINA_USE_HIP ON)
+  set(GNINA_GPU_LANGUAGE HIP)
+  project (gnina C CXX HIP)
+elseif(GNINA_GPU_BACKEND STREQUAL "CUDA")
+  set(GNINA_USE_HIP OFF)
+  set(GNINA_GPU_LANGUAGE CUDA)
+  project (gnina C CXX CUDA)
+else()
+  message(FATAL_ERROR
+    "GNINA_GPU_BACKEND must be CUDA or HIP, got '${GNINA_GPU_BACKEND}'")
+endif()
+message(STATUS "GPU backend: ${GNINA_GPU_BACKEND}")
+
+# The GPU sources keep the .cu extension under both backends; CMake only maps
+# that extension to CUDA automatically, so tell it otherwise when building HIP.
+# Call this from the same directory as the target that uses the sources.
+function(gnina_set_gpu_language)
+  if(GNINA_USE_HIP)
+    set_source_files_properties(${ARGN} PROPERTIES LANGUAGE HIP)
+  endif()
+endfunction()
+
+# Relocatable device code has to be linked as well as compiled; anything that
+# ends up containing gnina's GPU objects needs the device link step.
+function(gnina_gpu_link_options)
+  if(GNINA_USE_HIP)
+    foreach(tgt IN LISTS ARGN)
+      target_link_options(${tgt} PRIVATE ${GNINA_HIP_LINK_OPTIONS})
+    endforeach()
+  endif()
+endfunction()
 
 
-cmake_policy(SET CMP0104 NEW) 
+cmake_policy(SET CMP0104 NEW)
 cmake_policy(SET CMP0135 NEW)
 if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
@@ -12,6 +51,7 @@ cmake_policy(SET CMP0146 OLD) #too baked in
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_HIP_STANDARD 17)
 
 #RPATH instead of RUNPATH, needed for transitive torch libraries
 #TODO: get static build working so we don't need this
@@ -26,7 +66,17 @@ endif()
 option(BUILD_COVERAGE "Build with code coverage" OFF)
 option(GNINA_FORCE_EXTERNAL_LIBS "Use external libraries only" OFF)
 
-set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib;${CMAKE_INSTALL_PREFIX}/lib/gnina")
+# Version reported by "gnina --version". Left empty, it comes from git; set it
+# when building from a tree with no history, which otherwise reports "N/A".
+set(GNINA_VERSION "" CACHE STRING "Version string to report when git history is unavailable")
+
+# Written both as $ORIGIN-relative and absolute paths. The $ORIGIN entries let
+# the whole install tree be moved or copied elsewhere and still run without
+# LD_LIBRARY_PATH; bin/ and lib/ are siblings, so one set of $ORIGIN/../ entries
+# serves executables and libraries alike. The absolute entries are the fallback
+# for anything installed outside that layout.
+set(CMAKE_INSTALL_RPATH
+    "$ORIGIN/../lib;$ORIGIN/../lib64;$ORIGIN/../lib/gnina;${CMAKE_INSTALL_PREFIX}/lib;${CMAKE_INSTALL_PREFIX}/lib64;${CMAKE_INSTALL_PREFIX}/lib/gnina")
 set(CMAKE_CXX_FLAGS "-Wno-deprecated-declarations -Wno-unknown-pragmas")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules/")
 
@@ -34,10 +84,72 @@ if (BUILD_COVERAGE)
   set(CMAKE_CXX_FLAGS_RELEASE "-fprofile-arcs -ftest-coverage")
 endif()
 
-set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
-find_package(CUDA 12.0 REQUIRED)
 set(BUILD_CAFFE2 OFF)
-set(CAFFE2_USE_CUDNN 1)
+
+if(GNINA_USE_HIP)
+  # ROCm's cmake config usually lives outside the default search path.
+  if(DEFINED ENV{ROCM_PATH})
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{ROCM_PATH}")
+  elseif(EXISTS "/opt/rocm")
+    list(APPEND CMAKE_PREFIX_PATH "/opt/rocm")
+  endif()
+
+  # hip::host carries the include dirs and __HIP_PLATFORM_AMD__ that plain
+  # .cpp sources need in order to include <hip/hip_runtime.h>.
+  find_package(hip REQUIRED)
+  add_compile_definitions(GNINA_USE_HIP=1)
+  link_libraries(hip::host)
+
+  # gnina calls __device__ functions across translation units (tree_gpu,
+  # grid_gpu and quaternion are used by kernels in other files), so relocatable
+  # device code is mandatory, at compile and at link time.
+  #
+  # gnina also runs one docking thread per CPU worker and relies on each of
+  # them getting its own default stream; -fgpu-default-stream=per-thread is the
+  # HIP equivalent of nvcc's --default-stream per-thread.
+  # HIP declares its runtime APIs [[nodiscard]]; gnina ignores many return
+  # values the way CUDA code conventionally does, and the resulting warnings
+  # bury real diagnostics in thousands of lines.
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -fgpu-rdc -fgpu-default-stream=per-thread -Wno-unused-result")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
+  set(GNINA_HIP_LINK_OPTIONS -fgpu-rdc --hip-link)
+
+  if("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
+    set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O0 -g")
+  elseif("${CMAKE_BUILD_TYPE}" STREQUAL "RelWithDebInfo")
+    set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3 -g")
+  elseif("${CMAKE_BUILD_TYPE}" STREQUAL "Release")
+    set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3")
+  endif()
+
+  # By default build for whatever CMake detected for this machine, which is
+  # what you want when compiling for your own card.  Pass
+  # -DCMAKE_HIP_ARCHITECTURES=gfx90a to pin one, or -DGNINA_HIP_ALL_ARCHS=ON
+  # for a redistributable binary covering CDNA (MI100/MI210/MI300, 64-wide
+  # wavefronts) and RDNA2/RDNA3 (32-wide).  The broad list multiplies device
+  # compile time by the number of targets.
+  option(GNINA_HIP_ALL_ARCHS "Build device code for all commonly used AMD GPU architectures" OFF)
+  if(GNINA_HIP_ALL_ARCHS)
+    set(CMAKE_HIP_ARCHITECTURES "gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102"
+        CACHE STRING "AMD GPU architectures to build for" FORCE)
+  endif()
+  message(STATUS "HIP architectures: ${CMAKE_HIP_ARCHITECTURES}")
+
+  # --hip-link is a clang driver flag, so the C++ compiler doing the final link
+  # has to be ROCm's clang. Not hipcc: it compiles every .cpp as HIP and
+  # ignores CMAKE_HIP_ARCHITECTURES for them (see docs/AMD_GPU.md).
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(WARNING
+      "GNINA_GPU_BACKEND=HIP links relocatable device code with '--hip-link', "
+      "which requires ROCm's clang++. Configure with "
+      "-DCMAKE_CXX_COMPILER=$ROCM_PATH/llvm/bin/clang++; the current "
+      "C++ compiler is ${CMAKE_CXX_COMPILER_ID}.")
+  endif()
+else()
+  set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+  find_package(CUDA 12.0 REQUIRED)
+  set(CAFFE2_USE_CUDNN 1)
+endif()
 
 function(dump_cmake_variables)
     get_cmake_property(_variableNames VARIABLES)
@@ -62,13 +174,24 @@ include_directories($<TARGET_PROPERTY:openbabel,INTERFACE_INCLUDE_DIRECTORIES>)
 include_directories(${OpenBabel3_INCLUDE_DIRS})
 
 #make torch use system protobuf to be compat with caffe
-find_package(Protobuf REQUIRED)
+#nothing links against it any more (the caffe backend is gone), so don't make
+#it a hard requirement -- on HPC systems it is one more dependency to build
+find_package(Protobuf)
 
 #In order to build a mostly static executable, see docker/compat/Dockerfile
 # cmake .. -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-12.0 -DCMAKE_CUDA_ARCHITECTURES="60;61;70;75;80;90" -DUSE_STATIC_MKL=ON -DUSE_MKLDNN=ON -DBLAS=OpenBLAS -DBUILD_SHARED_LIBS=OFF -DBUILD_PYTHON=OFF -DCAFFE2_STATIC_LINK_CUDA=ON -DUSE_TENSORPIPE=OFF -DUSE_STATIC_NCCL=ON -DUSE_STATIC_CUDNN=ON -DTORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 9.0"
 
 # Set default architectures depending on CUDA version
-if (CUDA_VERSION_MAJOR LESS 11)
+if (GNINA_USE_HIP)
+    # Torch's ROCm build takes its target list from PYTORCH_ROCM_ARCH; keep it
+    # in step with the architectures gnina's own kernels are built for.
+    string(REPLACE ";" " " PYTORCH_ROCM_ARCH "${CMAKE_HIP_ARCHITECTURES}")
+    set(PYTORCH_ROCM_ARCH "${PYTORCH_ROCM_ARCH}" CACHE STRING "AMD architectures for torch")
+    # torch's LoadHIP.cmake reads this from the *environment*, not the cache,
+    # and hard-errors when GPU autodetection fails -- which it always does on a
+    # build node with no GPU.
+    set(ENV{PYTORCH_ROCM_ARCH} "${PYTORCH_ROCM_ARCH}")
+elseif (CUDA_VERSION_MAJOR LESS 11)
     # CUDA 10.x or earlier (up to sm_75)
     set(TORCH_CUDA_ARCH_LIST "3.7;5.0;6.0;6.1;7.0;7.5" CACHE STRING "Supported GPU architectures for CUDA < 11")
 elseif (CUDA_VERSION_MAJOR EQUAL 11)
@@ -91,24 +214,49 @@ else()
   find_package(Torch)
 endif()
 
-set(CMAKE_CUDA_ARCHITECTURES "all-major")
+if(NOT GNINA_USE_HIP)
+  set(CMAKE_CUDA_ARCHITECTURES "all-major")
+endif()
 
 if (NOT Torch_FOUND)
     message(STATUS "Torch not found, fetching via FetchContent")
 
   include(FetchContent)
+
+  # libtorch has to match the GPU backend: the CNN scorer hands tensors to
+  # torch, so a CUDA libtorch cannot be used on an AMD card and vice versa.
+  # Override with -DGNINA_LIBTORCH_URL=... to pin a different build.
+  if(GNINA_USE_HIP)
+    set(GNINA_LIBTORCH_URL
+        "https://download.pytorch.org/libtorch/rocm6.1/libtorch-cxx11-abi-shared-with-deps-2.4.1%2Brocm6.1.zip"
+        CACHE STRING "libtorch archive to download")
+  else()
+    set(GNINA_LIBTORCH_URL
+        "https://download.pytorch.org/libtorch/cu121/libtorch-cxx11-abi-shared-with-deps-2.4.1%2Bcu121.zip"
+        CACHE STRING "libtorch archive to download")
+  endif()
+
   #https://discuss.pytorch.org/t/using-fetchcontent-declare-in-cmake-to-pull-libtorch/177449
   FetchContent_Declare(
           libtorch
-          URL "https://download.pytorch.org/libtorch/cu121/libtorch-cxx11-abi-shared-with-deps-2.4.1%2Bcu121.zip"
+          URL "${GNINA_LIBTORCH_URL}"
   )
 
   FetchContent_MakeAvailable(libtorch)
   list(APPEND CMAKE_PREFIX_PATH "${libtorch_SOURCE_DIR}")
   find_package(Torch REQUIRED)
 
-  #the following may need to be updated if the version of torch is changed
   cmake_path(GET TORCH_LIBRARY PARENT_PATH TORCH_LIBDIR)
+
+  if(GNINA_USE_HIP)
+    # The ROCm libtorch ships a different (and much less stable) set of runtime
+    # libraries than the CUDA one -- libtorch_hip, libc10_hip, rocBLAS, MIOpen,
+    # hipBLASLt and their data files.  Glob rather than enumerate: the exact
+    # set changes between ROCm point releases.
+    file(GLOB TORCH_NEEDED "${TORCH_LIBDIR}/*.so" "${TORCH_LIBDIR}/*.so.*")
+    install(FILES ${TORCH_NEEDED} DESTINATION lib/gnina)
+  else()
+  #the following may need to be updated if the version of torch is changed
   set(TORCH_NEEDED
   libgomp-98b21ff3.so.1 
   libcudart-9335f6a2.so.12 
@@ -142,8 +290,28 @@ if (NOT Torch_FOUND)
 
   #install in subdirectory to avoid messing up a system torch install
   install(FILES ${TORCH_NEEDED} DESTINATION lib/gnina)
+  endif()
 else()
   message(STATUS "Torch found")
+  # When torch is fetched (above), its libraries are installed into lib/gnina,
+  # which CMAKE_INSTALL_RPATH already covers. An externally supplied libtorch is
+  # left where it is -- a ROCm libtorch is several GB, so copying it into the
+  # install tree is not reasonable -- which means its directory has to go on the
+  # RPATH instead. Without this the installed binaries only run with
+  # LD_LIBRARY_PATH set, and fail with "libtorch.so: cannot open shared object
+  # file" otherwise.
+  if(TORCH_INSTALL_PREFIX AND EXISTS "${TORCH_INSTALL_PREFIX}/lib")
+    list(APPEND CMAKE_INSTALL_RPATH "${TORCH_INSTALL_PREFIX}/lib")
+    # If libtorch sits inside the install prefix, add the relocatable form too,
+    # so moving the tree does not break the binaries.
+    string(FIND "${TORCH_INSTALL_PREFIX}" "${CMAKE_INSTALL_PREFIX}/" _torch_inside)
+    if(_torch_inside EQUAL 0)
+      file(RELATIVE_PATH _torch_rel
+           "${CMAKE_INSTALL_PREFIX}/lib" "${TORCH_INSTALL_PREFIX}/lib")
+      list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN/../lib/${_torch_rel}")
+    endif()
+    message(STATUS "Adding to install RPATH: ${TORCH_INSTALL_PREFIX}/lib")
+  endif()
 endif()
 
 
@@ -153,6 +321,19 @@ if(GNINA_FORCE_EXTERNAL_LIBS)
   find_package(libmolgrid REQUIRED)
 else()
   find_package(libmolgrid)
+endif()
+
+if(NOT LIBMOLGRID_LIBRARY AND GNINA_USE_HIP)
+  # Upstream libmolgrid is CUDA-only, so auto-fetching it here would produce a
+  # library that cannot run on an AMD card.  Make the user point at a ROCm
+  # build instead of failing later with confusing link errors.
+  message(FATAL_ERROR
+    "libmolgrid was not found.\n"
+    "The HIP/ROCm build will not fetch and build libmolgrid automatically, "
+    "because the upstream sources are CUDA-only. Build a ROCm-capable "
+    "libmolgrid separately (see docs/AMD_GPU.md) and point cmake at it with "
+    "-DLIBMOLGRID_LIBRARY=/path/to/libmolgrid.a "
+    "-DLIBMOLGRID_INCLUDE_DIR=/path/to/include")
 endif()
 
 if(NOT LIBMOLGRID_LIBRARY)

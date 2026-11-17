@@ -16,9 +16,15 @@ set( TEST_SRCS
 
 find_package(OpenMP)
 
+#the .cu tests build against whichever GPU backend is active
+set(GPU_TEST_SRCS ${TEST_SRCS})
+list(FILTER GPU_TEST_SRCS INCLUDE REGEX "\\.cu$")
+gnina_set_gpu_language(${GPU_TEST_SRCS})
+
 #todo - factor into individual tests?
 add_executable(gninacheck ${TEST_SRCS})
 target_link_libraries(gninacheck gninalib_static ${Boost_LIBRARIES} ${OpenBabel3_LIBRARIES} ${RDKIT_LIBRARIES})
+gnina_gpu_link_options(gninacheck)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(gninacheck OpenMP::OpenMP_CXX)
 endif()
