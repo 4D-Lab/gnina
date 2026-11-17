@@ -3,88 +3,85 @@
 
 This is a custom version of [gnina](https://github.com/gnina/gnina) developed by the [4D Lab](https://github.com/4D-Lab), meant to be used on the LUMI and Roihu supercomputers.
 
-### AMD GPUs (ROCm)
+Installation on LUMI and Roihu
+==============================
 
-gnina also builds against HIP/ROCm (ROCm 5.7+, 6.x recommended; cmake 3.25+).
-The command line is the same as the CUDA build, and the GPU is used the same
-way: CNN scoring and rescoring (every `--cnn_scoring` mode, including
-`refinement` and `all`) and `gninagrid` run on the AMD GPU. There are two
-differences:
+Each machine has a build script that downloads and compiles everything gnina
+needs (Boost, jsoncpp, OpenBabel, libmolgrid, libtorch and gnina itself) into
+your project directory. You do not need to install anything by hand. If a
+build stops partway, run the script again: finished steps are skipped.
 
-* GPUs are selected with `HIP_VISIBLE_DEVICES` instead of
-  `CUDA_VISIBLE_DEVICES`.
-* The experimental `--gpu_docking` flag is not available. By default the
-  docking search (Monte Carlo sampling and BFGS minimization with the
-  empirical scoring function) runs on the CPU, and `--gpu_docking` would move
-  that search onto the GPU as well. It relies on CUDA dynamic parallelism,
-  which ROCm does not have. Upstream marks it "not recommended", so normal
-  docking runs are not affected.
+| | LUMI-G | Roihu |
+|---|---|---|
+| GPU | AMD MI250X | NVIDIA GH200 |
+| Build script | `scripts/build_lumi.sh` | `scripts/build_roihu.sh` |
+| Installs to | `/project/$PROJECT/gnina-rocm` | `/projappl/$PROJECT/gnina-cuda` |
 
-`GNINA_GPU_BACKEND` defaults to `CUDA`, so NVIDIA builds are unaffected, but
-they were not tested after these changes.
-
-ROCm itself must already be installed, with `$ROCM_PATH` pointing to it
-(usually `/opt/rocm`). CUDA and cuDNN are not needed. Install the system
-packages (Ubuntu 22.04/24.04):
+### LUMI
 
 ```bash
-sudo apt-get install build-essential cmake git wget swig \
-  libboost-all-dev libeigen3-dev libgoogle-glog-dev \
-  libprotobuf-dev protobuf-compiler libhdf5-dev libatlas-base-dev \
-  libjsoncpp-dev librdkit-dev \
-  python3-dev python3-numpy python3-pip python3-pytest
+# on a login node
+cd /project/project_465XXXXXX
+git clone https://github.com/4D-Lab/gnina.git
+cd gnina
+export PROJECT=project_465XXXXXX
+
+# 1. download the sources (compute nodes have no internet access)
+FETCH_ONLY=1 ./scripts/build_lumi.sh
+
+# 2. compile as a batch job on a CPU node (no GPU-hours used)
+sbatch --account=$PROJECT scripts/build_lumi.sbatch
+tail -f gnina-build-<jobid>.log
+
+# 3. check the build: static checks on the login node, then on a GPU
+./scripts/verify_lumi.sh
+srun -A $PROJECT -p dev-g --gpus-per-node=1 -c 8 -t 20 ./scripts/verify_lumi.sh
 ```
 
-Install OpenBabel 3. Versions 3.1.1 and older have errors in bond order
-determination, so build it from source:
+To use gnina in a job script:
 
 ```bash
-git clone https://github.com/openbabel/openbabel.git
-cd openbabel
-mkdir build && cd build
-cmake -DWITH_MAEPARSER=OFF -DWITH_COORDGEN=OFF -DPYTHON_BINDINGS=ON -DRUN_SWIG=ON ..
-make -j$(nproc)
-sudo make install
-cd ../..
+module load CrayEnv rocm
+export PATH=/project/project_465XXXXXX/gnina-rocm/bin:$PATH
+srun gnina -r rec.pdb -l lig.sdf --autobox_ligand lig.sdf -o docked.sdf.gz
 ```
 
-Then build a HIP version of libmolgrid and gnina. Replace `gfx90a` with your
-GPU's architecture (`rocminfo | grep gfx`).
+### Roihu
+
+Roihu's GPU nodes have ARM (Grace) CPUs, so build from inside a GPU
+allocation; a binary built on an x86 login node will not run there.
 
 ```bash
 git clone https://github.com/4D-Lab/gnina.git
 cd gnina
-
-# libmolgrid is CUDA-only upstream; this script ports it to HIP
-git clone https://github.com/gnina/libmolgrid.git ../libmolgrid
-./scripts/hipify_libmolgrid.sh $PWD/../libmolgrid
-cmake -S ../libmolgrid -B ../libmolgrid/build \
-  -DCMAKE_CXX_COMPILER=$ROCM_PATH/llvm/bin/clang++ \
-  -DCMAKE_HIP_ARCHITECTURES=gfx90a -DAMDGPU_TARGETS=gfx90a \
-  -DCMAKE_BUILD_TYPE=Release -DBUILD_STATIC=ON -DBUILD_SHARED=OFF \
-  -DCMAKE_INSTALL_PREFIX=/usr/local
-sudo cmake --build ../libmolgrid/build -j$(nproc) --target install
-
-# gnina (downloads a ROCm build of libtorch if none is found)
-mkdir build && cd build
-cmake .. \
-  -DGNINA_GPU_BACKEND=HIP \
-  -DCMAKE_CXX_COMPILER=$ROCM_PATH/llvm/bin/clang++ \
-  -DCMAKE_HIP_ARCHITECTURES=gfx90a \
-  -DLIBMOLGRID_LIBRARY=/usr/local/lib/libmolgrid.a \
-  -DLIBMOLGRID_INCLUDE_DIR=/usr/local/include
-make -j$(nproc)
-sudo make install
-
-# check the GPU kernels against the CPU implementation
-./test/gnina/gninacheck -- --n_iters 1
+export PROJECT=project_2XXXXXX
+srun -A $PROJECT -p <gpu-partition> --gres=gpu:1 -c 32 -t 4:00:00 --pty bash
+./scripts/build_roihu.sh
 ```
 
-Use ROCm's `clang++` as the C++ compiler, not `hipcc`. A Docker recipe is in
-`docker/rocm-ubuntu-24.04/Dockerfile`, and [docs/AMD_GPU.md](docs/AMD_GPU.md)
-covers architectures, libtorch versions and troubleshooting. For CSC's LUMI
-(AMD MI250X) and Roihu (NVIDIA GH200) there are ready-made build scripts in
-`scripts/` and notes in [docs/CSC.md](docs/CSC.md).
+When it finishes, the script prints the `module load` and `export` lines to
+put in your job scripts. The Roihu build has not been tested yet.
+
+### Differences on AMD GPUs
+
+The command line is the same as upstream gnina, and CNN scoring and
+`gninagrid` run on the AMD GPU. Two things differ:
+
+* GPUs are selected with `HIP_VISIBLE_DEVICES` instead of
+  `CUDA_VISIBLE_DEVICES`.
+* The experimental `--gpu_docking` flag is not available. It relies on CUDA
+  dynamic parallelism, which ROCm does not have. Upstream marks it "not
+  recommended", and normal docking runs do not use it.
+
+NVIDIA builds are unaffected (CUDA is still the default backend), but they
+were not tested after these changes.
+
+### More detail
+
+* [docs/CSC.md](docs/CSC.md): what the scripts do, overriding versions and
+  paths, a container alternative, and troubleshooting on LUMI and Roihu.
+* [docs/AMD_GPU.md](docs/AMD_GPU.md): building for other AMD GPUs, by hand or
+  with `docker/rocm-ubuntu-24.04/Dockerfile`.
 
 Help
 ====
