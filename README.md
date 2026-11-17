@@ -1,7 +1,87 @@
 [![codecov](https://codecov.io/gh/gnina/gnina/branch/master/graph/badge.svg?token=kOC9GUKEGa)](https://codecov.io/gh/gnina/gnina)
 [![Github CI](https://github.com/gnina/gnina/actions/workflows/CI.yml/badge.svg)](https://github.com/gnina/gnina/actions)
 
-gnina (pronounced NEE-na) is a molecular docking program with integrated support for scoring and optimizing ligands using convolutional neural networks. It is a fork of [smina](http://smina.sf.net/), which is a fork of [AutoDock Vina](http://vina.scripps.edu/).  
+This is a custom version of [gnina](https://github.com/gnina/gnina) developed by the [4D Lab](https://github.com/4D-Lab), meant to be used on the LUMI and Roihu supercomputers.
+
+Installation on LUMI and Roihu
+==============================
+
+Each machine has a build script that downloads and compiles everything gnina
+needs (Boost, jsoncpp, OpenBabel, libmolgrid, libtorch and gnina itself) into
+your project directory. You do not need to install anything by hand. If a
+build stops partway, run the script again: finished steps are skipped.
+
+| | LUMI-G | Roihu |
+|---|---|---|
+| GPU | AMD MI250X | NVIDIA GH200 |
+| Build script | `scripts/build_lumi.sh` | `scripts/build_roihu.sh` |
+| Installs to | `/project/$PROJECT/gnina-rocm` | `/projappl/$PROJECT/gnina-cuda` |
+
+### LUMI
+
+```bash
+# on a login node
+cd /project/project_465XXXXXX
+git clone https://github.com/4D-Lab/gnina.git
+cd gnina
+export PROJECT=project_465XXXXXX
+
+# 1. download the sources (compute nodes have no internet access)
+FETCH_ONLY=1 ./scripts/build_lumi.sh
+
+# 2. compile as a batch job on a CPU node (no GPU-hours used)
+sbatch --account=$PROJECT scripts/build_lumi.sbatch
+tail -f gnina-build-<jobid>.log
+
+# 3. check the build: static checks on the login node, then on a GPU
+./scripts/verify_lumi.sh
+srun -A $PROJECT -p dev-g --gpus-per-node=1 -c 8 -t 20 ./scripts/verify_lumi.sh
+```
+
+To use gnina in a job script:
+
+```bash
+module load CrayEnv rocm
+export PATH=/project/project_465XXXXXX/gnina-rocm/bin:$PATH
+srun gnina -r rec.pdb -l lig.sdf --autobox_ligand lig.sdf -o docked.sdf.gz
+```
+
+### Roihu
+
+Roihu's GPU nodes have ARM (Grace) CPUs, so build from inside a GPU
+allocation; a binary built on an x86 login node will not run there.
+
+```bash
+git clone https://github.com/4D-Lab/gnina.git
+cd gnina
+export PROJECT=project_2XXXXXX
+srun -A $PROJECT -p <gpu-partition> --gres=gpu:1 -c 32 -t 4:00:00 --pty bash
+./scripts/build_roihu.sh
+```
+
+When it finishes, the script prints the `module load` and `export` lines to
+put in your job scripts. The Roihu build has not been tested yet.
+
+### Differences on AMD GPUs
+
+The command line is the same as upstream gnina, and CNN scoring and
+`gninagrid` run on the AMD GPU. Two things differ:
+
+* GPUs are selected with `HIP_VISIBLE_DEVICES` instead of
+  `CUDA_VISIBLE_DEVICES`.
+* The experimental `--gpu_docking` flag is not available. It relies on CUDA
+  dynamic parallelism, which ROCm does not have. Upstream marks it "not
+  recommended", and normal docking runs do not use it.
+
+NVIDIA builds are unaffected (CUDA is still the default backend), but they
+were not tested after these changes.
+
+### More detail
+
+* [docs/CSC.md](docs/CSC.md): what the scripts do, overriding versions and
+  paths, a container alternative, and troubleshooting on LUMI and Roihu.
+* [docs/AMD_GPU.md](docs/AMD_GPU.md): building for other AMD GPUs, by hand or
+  with `docker/rocm-ubuntu-24.04/Dockerfile`.
 
 Help
 ====

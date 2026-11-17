@@ -82,12 +82,17 @@ struct gpu_data {
             pairs_size(0), other_pairs_size(0), device_on(false), device_id(0) {
     }
 
+    //launches a kernel, so host-only where device-side launches are
+    //unavailable (HIP/ROCm) -- see gpu_runtime.h
     template<typename infoT>
-    __host__  __device__ fl eval_interacting_pairs_deriv_gpu(const infoT& info,
+    GNINA_DEVICE_LAUNCHER fl eval_interacting_pairs_deriv_gpu(const infoT& info,
         fl v, interacting_pair* pairs, unsigned pairs_sz) const;
 
+#ifdef GNINA_DEVICE_LAUNCH_SUPPORTED
+    //re-enters the scoring kernels from device code; needs dynamic parallelism
     template<typename infoT> __device__ fl eval_deriv_gpu(const infoT& info,
         const vec& v, const conf_gpu& c, change_gpu& g);
+#endif
 
     size_t node_idx_dfs2bfs(const size_t node_idx);
     fl eval(const GPUNonCacheInfo& info, const float v);

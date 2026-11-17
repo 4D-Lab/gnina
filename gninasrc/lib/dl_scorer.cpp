@@ -14,7 +14,7 @@ int initializeCUDA(int device) {
   error = cudaGetDevice(&device);
 
   if (error != cudaSuccess) {
-    std::cerr << "cudaGetDevice returned error code " << error << "\n";
+    std::cerr << "getting the current GPU device returned error code " << error << "\n";
     return error;
   }
 
@@ -22,7 +22,7 @@ int initializeCUDA(int device) {
   error = cudaDeviceGetAttribute(&mode, cudaDevAttrComputeMode, device);
 
   if (mode == cudaComputeModeProhibited) {
-    std::cerr << "Error: device is running in <Compute Mode Prohibited>, no threads can use ::cudaSetDevice().\n";
+    std::cerr << "Error: device is running in <Compute Mode Prohibited>, no threads can use it.\n";
     return -1;
   }
 

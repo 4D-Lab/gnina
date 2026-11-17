@@ -7,7 +7,7 @@
 #include "gpu_util.h"
 #include <cassert>
 #include <boost/thread/thread.hpp>
-#include <cuda.h>
+#include "gpu_runtime.h"
 
 #define align_down_pow2(n, size)            \
     ((decltype (n)) ((uintptr_t) (n) & ~((size) - 1)))

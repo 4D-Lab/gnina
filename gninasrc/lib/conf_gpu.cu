@@ -25,7 +25,7 @@ size_t change_gpu::idx_cpu2gpu(size_t cpu_node_idx, size_t offset_in_node,
   size_t gpu_node_idx = d.node_idx_cpu2gpu(cpu_node_idx);
 
   constexpr size_t extra_floats_per_lig_root = 5;
-  size_t lig_roots_before_node = min(gpu_node_idx, d.nlig_roots);
+  size_t lig_roots_before_node = std::min<size_t>(gpu_node_idx, d.nlig_roots);
   size_t gpu_flat_idx = gpu_node_idx
       + extra_floats_per_lig_root * lig_roots_before_node + offset_in_node;
 
@@ -39,7 +39,7 @@ size_t conf_gpu::idx_cpu2gpu(size_t cpu_node_idx, size_t offset_in_node,
   size_t gpu_node_idx = d.node_idx_cpu2gpu(cpu_node_idx);
 
   constexpr size_t extra_floats_per_lig_root = 6;
-  size_t lig_roots_before_node = min(gpu_node_idx, d.nlig_roots);
+  size_t lig_roots_before_node = std::min<size_t>(gpu_node_idx, d.nlig_roots);
   size_t gpu_flat_idx = gpu_node_idx
       + extra_floats_per_lig_root * lig_roots_before_node + offset_in_node;
 
@@ -70,15 +70,14 @@ change_gpu::change_gpu(const change_gpu& src, device_buffer& buffer)
   values = buffer.copy(src.values, n + 1, cudaMemcpyDeviceToDevice);
 }
 
+// Device-only (see the declaration in conf_gpu.h), so the device path is the
+// only reachable one. It used to be selected with #ifndef __CUDA_ARCH__, which
+// works under nvcc because nvcc drops __device__ bodies from the host pass;
+// clang parses them in both passes, and the host branch calls a host-only
+// function from a __device__ function.
 __device__ change_gpu& change_gpu::operator=(const change_gpu& src) {
   assert(values && n == src.n);
-#ifndef __CUDA_ARCH__
-  CUDA_CHECK_GNINA(definitelyPinnedMemcpy(values, src.values, sizeof(float) * n,
-          cudaMemcpyDeviceToDevice));
-#else
   memcpy(values, src.values, sizeof(float) * n);
-#endif
-
   return *this;
 }
 
@@ -89,7 +88,7 @@ __device__ void change_gpu::clear() {
 
 //dkoes - multiply by -1
 void change_gpu::invert() {
-  scalar_mult_kernel<<<1, min(GNINA_CUDA_NUM_THREADS, n)>>>(-1.0, n, values);
+  scalar_mult_kernel<<<1, std::min<int>(GNINA_CUDA_NUM_THREADS, n)>>>(-1.0, n, values);
 }
 
 //return dot product
@@ -192,7 +191,7 @@ conf_gpu::conf_gpu(const conf_gpu& src, device_buffer& buffer)
 
 __host__  __device__ conf_gpu& conf_gpu::operator=(const conf_gpu& src) {
   assert(values && n == src.n);
-#ifndef __CUDA_ARCH__
+#ifndef GNINA_DEVICE_COMPILE
   CUDA_CHECK_GNINA(
       definitelyPinnedMemcpy(values, src.values, sizeof(float) * n,
           cudaMemcpyDeviceToDevice));

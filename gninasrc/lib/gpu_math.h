@@ -3,7 +3,7 @@
 #include <float.h>
 #include "array3d.h"
 
-#include <cuda_runtime.h>
+#include "gpu_runtime.h"
 #include "device_buffer.h"
 #include <random>
 
@@ -71,27 +71,27 @@ inline std::ostream& operator<<(std::ostream& os, const gfloat3& f) {
 //work by applying hardware operations separately to individual elements of the
 //respective types.
 
-#ifdef __CUDACC__
+#ifdef GNINA_GPUCC
+
+/* HIP's __shfl_down() defaults its width to the wavefront size, which is what
+ * we want.  The *_sync variants take a 32-bit mask that cannot describe a
+ * 64-wide wavefront, so they are deliberately not used on AMD. */
+#ifdef GNINA_HIP
+#define GNINA_SHFL_DOWN(val, offset) __shfl_down((val), (offset))
+#elif __CUDACC_VER_MAJOR__ >= 9
+#define GNINA_SHFL_DOWN(val, offset) __shfl_down_sync(0xffffffff, (val), (offset))
+#else
+#define GNINA_SHFL_DOWN(val, offset) __shfl_down((val), (offset))
+#endif
 
 __device__ __inline__ float shuffle_down(float val, int offset) {
-  //wrapper for sync for normal flaot type
-#if __CUDACC_VER_MAJOR__ >= 9
-  return __shfl_down_sync(0xffffffff, val, offset);
-#else
-  return __shfl_down(val,offset);
-#endif
+  return GNINA_SHFL_DOWN(val, offset);
 }
 
 __device__  __inline__  static gfloat3 shuffle_down(const gfloat3 &a, int delta) {
-#if __CUDACC_VER_MAJOR__ >= 9
-  return gfloat3(__shfl_down_sync(0xffffffff, a.x, delta),
-      __shfl_down_sync(0xffffffff, a.y, delta),
-      __shfl_down_sync(0xffffffff, a.z, delta));
-#else
-  return gfloat3(__shfl_down(a.x, delta),
-      __shfl_down(a.y, delta),
-      __shfl_down(a.z, delta));
-#endif
+  return gfloat3(GNINA_SHFL_DOWN(a.x, delta),
+      GNINA_SHFL_DOWN(a.y, delta),
+      GNINA_SHFL_DOWN(a.z, delta));
 }
 
 template<class T>
@@ -104,7 +104,10 @@ __device__  inline static T pseudoAtomicAdd(T* address, T value) {
 
 #endif
 
-#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 600
+/* Pre-Pascal NVIDIA parts have no native double atomicAdd.  Every AMD target
+   HIP supports does (natively or via a compiler-generated CAS loop), so the
+   fallback below is CUDA-only. */
+#if defined(GNINA_HIP) || !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 600
 #else
 __device__ inline double atomicAdd(double* address, double val)
 {
@@ -178,10 +181,21 @@ __host__  __device__   inline static gfloat3 operator*(gfloat3 a, T b) {
   return gfloat3(a.x * b, a.y * b, a.z * b);
 }
 
+/* Exact-match overload for gfloat3.  HIP's vector types come with their own
+   scalar*vector operator; without this the gfloat3 case would be ambiguous
+   between that one and the float3 overload below, since both need a
+   derived-to-base conversion. */
+template<typename T>
+__host__  __device__  inline static gfloat3 operator*(T b, const gfloat3 &a) {
+  return gfloat3(a.x * b, a.y * b, a.z * b);
+}
+
+#ifndef GNINA_HIP
 template<typename T>
 __host__  __device__  inline static float3 operator*(T b, float3 a) {
   return gfloat3(a.x * b, a.y * b, a.z * b);
 }
+#endif
 
 template<typename T, typename U>
 class array3d_gpu {

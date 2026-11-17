@@ -42,26 +42,10 @@ __host__  __device__ qt angle_to_quaternion(const vec& rotation) {
   return qt(1, 0, 0, 0);
 }
 
-#ifndef __CUDA_ARCH__
-vec quaternion_to_angle(const qt& q) {
-  assert(quaternion_is_normalized(q));
-  const fl c = q.R_component_1();
-  if(c > -1 && c < 1) { // c may in theory be outside [-1, 1] even with approximately normalized q, due to rounding errors
-    fl angle = 2*std::acos(c);// acos is in [0, pi]
-    if(angle > pi)
-    angle -= 2*pi;// now angle is in [-pi, pi]
-    vec axis(q.R_component_2(), q.R_component_3(), q.R_component_4());
-    fl s = std::sin(angle/2);// perhaps not very efficient to calculate sin of acos
-    if(std::abs(s) < epsilon_fl)
-    return zero_vec;
-    axis *= (angle / s);
-    return axis;
-  }
-  else // when c = -1 or 1, angle/2 = 0 or pi, therefore angle = 0
-  return zero_vec;
-}
-#else
-__device__ vec quaternion_to_angle(const qt& q) {
+// One definition for both passes: the host and device versions were
+// numerically identical (fl is float, so acosf/sinf/fabsf match std::acos/
+// sin/abs), and clang requires the overload set to agree across passes.
+__host__ __device__ vec quaternion_to_angle(const qt& q) {
   assert(quaternion_is_normalized(q));
   const fl c = q.R_component_1();
   if (c > -1 && c < 1) { // c may in theory be outside [-1, 1] even with approximately normalized q, due to rounding errors
@@ -76,7 +60,6 @@ __device__ vec quaternion_to_angle(const qt& q) {
     // when c = -1 or 1, angle/2 = 0 or pi, therefore angle = 0
     return vec(0, 0, 0);
 }
-#endif
 
 qt random_orientation(rng& generator) {
   fl a0 = random_normal(0, 1, generator);
